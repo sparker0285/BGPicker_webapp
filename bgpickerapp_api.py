@@ -33,7 +33,7 @@ if 'active_tab' not in st.session_state: st.session_state['active_tab'] = "🎲 
 # --- HELPER FUNCTIONS ---
 def get_auth_session():
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {BGG_API_TOKEN}", "User-Agent": "StreamlitGamePicker/10.0", "Accept": "application/xml"})
+    session.headers.update({"Authorization": f"Bearer {BGG_API_TOKEN}", "User-Agent": "StreamlitGamePicker/11.0", "Accept": "application/xml"})
     return session
 
 def clean_description(desc_text):
@@ -53,7 +53,7 @@ def get_best_player_count(poll_tag):
             best_count = num_players
     return best_count
 
-# --- DATA LOADING ENGINE (CSV vs API) ---
+# --- DATA LOADING ENGINE ---
 
 @st.cache_data(ttl=3600)
 def fetch_from_api(username):
@@ -284,7 +284,6 @@ def render_game_card(game, username):
 st.sidebar.title("Seth's BG Tool")
 username = st.sidebar.text_input("BGG Username", value="sparker0285")
 
-# --- DATA RELOAD LOGIC ---
 if st.sidebar.button("Reload Collection from BGG"):
     st.session_state['force_reload'] = True
     st.cache_data.clear()
@@ -295,19 +294,49 @@ pick_qty = st.sidebar.number_input("Pick Quantity", 1, 5, 1)
 if username:
     full_df, source = load_data(username)
     
-    # Show status/download options if loaded from API
-    if source == "api" and not full_df.empty:
-        st.sidebar.success("Loaded fresh data from BGG!")
-        csv = full_df.to_csv(index=False).encode('utf-8')
-        st.sidebar.download_button(
-            label="💾 Download CSV to Persist",
-            data=csv,
-            file_name="bgg_collection.csv",
-            mime="text/csv",
-            help="Download this file, overwrite the one in your project folder, and push to GitHub. This makes the app load instantly next time!"
-        )
+    # --- NEW DATA MANAGEMENT SECTION ---
+    with st.sidebar.expander("💾 Data Management", expanded=False):
+        st.markdown("### Export / Import")
+        
+        # 1. Export Button (Always available for current data)
+        if not full_df.empty:
+            csv_data = full_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="⬇️ Export Current Data (CSV)",
+                data=csv_data,
+                file_name="bgg_collection.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        st.divider()
+        
+        # 2. Import Uploader (Overwrites current session)
+        uploaded_file = st.file_uploader("⬆️ Import CSV (Overwrites)", type=['csv'])
+        if uploaded_file is not None:
+            try:
+                # IMPORTANT: Use eval to convert string lists back to actual lists
+                uploaded_df = pd.read_csv(uploaded_file, converters={
+                    'Mechanics': eval, 
+                    'Categories': eval, 
+                    'FamilyMechanisms': eval
+                })
+                
+                if not uploaded_df.empty:
+                    full_df = uploaded_df
+                    source = "upload" # Update source indicator
+                    st.success("✅ Loaded data from CSV!")
+            except Exception as e:
+                st.error(f"Error reading CSV: {e}")
+
+    # Display Source Status
+    if source == "api":
+        st.sidebar.success("Source: BGG API")
     elif source == "csv":
-        st.sidebar.info("⚡ Loaded instantly from CSV")
+        st.sidebar.info("Source: Local CSV")
+    elif source == "upload":
+        st.sidebar.warning("Source: Uploaded File")
+
 else: st.stop()
 
 if full_df.empty:
@@ -337,10 +366,7 @@ sorted_cats = get_sorted_options(owned_df, 'Categories')
 selected_cats = st.sidebar.multiselect("Game Categories", sorted_cats)
 player_count = st.sidebar.slider("Number of Players", 1, 10, 4)
 strict_best = st.sidebar.checkbox("Only 'Best At' this count", value=False, help="Only show games voted Best at this count.")
-
-# UPDATED: Added (pile of shame) text
 play_status = st.sidebar.radio("History", ["All", "Played", "Unplayed (pile of shame)"])
-
 c1, c2 = st.sidebar.columns(2)
 max_age_req = c1.slider("Max Age", 4, 18, 18)
 max_time = c2.slider("Max Time", 15, 240, 90)
@@ -348,7 +374,7 @@ weight_range = st.sidebar.slider("Complexity", 1.0, 5.0, (1.0, 5.0))
 
 mask = (owned_df['Time'] <= max_time) & (owned_df['Weight'].between(weight_range[0], weight_range[1])) & (owned_df['MinAge'] <= max_age_req) 
 if play_status == "Played": mask = mask & (owned_df['NumPlays'] > 0)
-elif play_status == "Unplayed (pile of shame)": mask = mask & (owned_df['NumPlays'] == 0) # Logic Updated to match text
+elif play_status == "Unplayed (pile of shame)": mask = mask & (owned_df['NumPlays'] == 0) 
 if strict_best: mask = mask & (owned_df['BestPlayers'].astype(str) == str(player_count))
 else: mask = mask & (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
 if selected_mechanics: mask = mask & owned_df['Mechanics'].apply(lambda x: bool(set(selected_mechanics) & set(x)))
