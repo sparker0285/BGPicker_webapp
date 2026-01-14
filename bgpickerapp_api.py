@@ -33,7 +33,7 @@ if 'active_tab' not in st.session_state: st.session_state['active_tab'] = "🎲 
 # --- HELPER FUNCTIONS ---
 def get_auth_session():
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {BGG_API_TOKEN}", "User-Agent": "StreamlitGamePicker/11.0", "Accept": "application/xml"})
+    session.headers.update({"Authorization": f"Bearer {BGG_API_TOKEN}", "User-Agent": "StreamlitGamePicker/12.0", "Accept": "application/xml"})
     return session
 
 def clean_description(desc_text):
@@ -54,14 +54,12 @@ def get_best_player_count(poll_tag):
     return best_count
 
 # --- DATA LOADING ENGINE ---
-
 @st.cache_data(ttl=3600)
 def fetch_from_api(username):
     """Fetches fresh data from BGG API."""
     session = get_auth_session()
     subtypes = ['boardgame', 'boardgameexpansion']
     combined_items = []
-    
     for stype in subtypes:
         with st.spinner(f"Fetching {stype}s from BGG..."):
             url = f"https://boardgamegeek.com/xmlapi2/collection?username={username}&subtype={stype}"
@@ -81,9 +79,7 @@ def fetch_from_api(username):
                     else: time.sleep(2); attempts += 1
                 except: attempts += 1; time.sleep(2)
         time.sleep(1)
-
     if not combined_items: return pd.DataFrame()
-
     collection_map = {}
     ownership_map = {}
     for item in combined_items:
@@ -94,14 +90,11 @@ def fetch_from_api(username):
         is_owned = status.get('own') == "1" if status is not None else False
         collection_map[g_id] = plays
         ownership_map[g_id] = is_owned
-
     game_ids = list(collection_map.keys())
     if not game_ids: return pd.DataFrame()
-
     batch_size = 20
     all_games = []
     progress_bar = st.progress(0, text=f"Analyzing {len(game_ids)} items...")
-    
     for i in range(0, len(game_ids), batch_size):
         batch = game_ids[i:i + batch_size]
         ids_str = ",".join(batch)
@@ -130,7 +123,6 @@ def fetch_from_api(username):
                         family_mechanisms = [link.get('value').replace("Mechanism:", "").strip() for link in item.findall("link[@type='boardgamefamily']") if link.get('value').startswith("Mechanism:")]
                         poll = item.find("poll[@name='suggested_numplayers']")
                         best_at = get_best_player_count(poll)
-                        
                         all_games.append({
                             "Name": name, "Image": image, "Description": desc, "Type": g_type,
                             "MinPlayers": min_p, "MaxPlayers": max_p, "MinAge": min_age,
@@ -143,35 +135,21 @@ def fetch_from_api(username):
         progress_bar.progress(min((i + batch_size) / len(game_ids), 1.0))
         time.sleep(0.5)
     progress_bar.empty()
-    
     df = pd.DataFrame(all_games)
     if not df.empty and 'Type' not in df.columns: df['Type'] = 'boardgame'
     return df
 
 def load_data(username):
-    """Smart loader: tries CSV first, then API."""
     csv_file = "bgg_collection.csv"
-    
-    # 1. If explicit reload requested, skip CSV and go to API
     if st.session_state.get('force_reload', False):
         df = fetch_from_api(username)
-        st.session_state['force_reload'] = False # Reset flag
+        st.session_state['force_reload'] = False 
         return df, "api"
-
-    # 2. Try loading local CSV
     if os.path.exists(csv_file):
         try:
-            # We need to eval the list columns because CSV saves them as strings
-            df = pd.read_csv(csv_file, converters={
-                'Mechanics': eval, 
-                'Categories': eval, 
-                'FamilyMechanisms': eval
-            })
+            df = pd.read_csv(csv_file, converters={'Mechanics': eval, 'Categories': eval, 'FamilyMechanisms': eval})
             return df, "csv"
-        except:
-            pass # CSV might be corrupt, fall through to API
-
-    # 3. Fallback to API
+        except: pass 
     return fetch_from_api(username), "api"
 
 # --- HISTORY & STATS FUNCTIONS ---
@@ -280,62 +258,50 @@ def render_game_card(game, username):
         with st.expander("📖 Description"): st.markdown(game['Description'], unsafe_allow_html=True)
         st.markdown(f"[View on BGG](https://boardgamegeek.com/boardgame/{game['ID']})")
 
-# --- APP START ---
+# --- APP LAYOUT START ---
 st.sidebar.title("Seth's BG Tool")
 username = st.sidebar.text_input("BGG Username", value="sparker0285")
 
-if st.sidebar.button("Reload Collection from BGG"):
-    st.session_state['force_reload'] = True
-    st.cache_data.clear()
-    st.rerun()
+# --- VISUAL CONTAINERS FOR ORDERING ---
+# We define these containers first so we can control the order of elements
+c_config = st.sidebar.container() # Top: Reload, Pick Qty
+c_filters = st.sidebar.container() # Middle: Criteria, Sliders
+c_datamgmt = st.sidebar.container() # Bottom: Data Mgmt, Source Info
 
-pick_qty = st.sidebar.number_input("Pick Quantity", 1, 5, 1)
+# --- 1. CONFIG SECTION (Top) ---
+with c_config:
+    if st.button("Reload Collection from BGG"):
+        st.session_state['force_reload'] = True
+        st.cache_data.clear()
+        st.rerun()
+    pick_qty = st.number_input("Pick Quantity", 1, 5, 1)
 
+# --- 2. DATA MANAGEMENT SECTION (Bottom of Sidebar, but logic runs first) ---
+# We execute this logic *before* filters so updated data is available immediately
 if username:
     full_df, source = load_data(username)
     
-    # --- NEW DATA MANAGEMENT SECTION ---
-    with st.sidebar.expander("💾 Data Management", expanded=False):
-        st.markdown("### Export / Import")
-        
-        # 1. Export Button (Always available for current data)
-        if not full_df.empty:
-            csv_data = full_df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="⬇️ Export Current Data (CSV)",
-                data=csv_data,
-                file_name="bgg_collection.csv",
-                mime="text/csv",
-                use_container_width=True
-            )
-        
-        st.divider()
-        
-        # 2. Import Uploader (Overwrites current session)
-        uploaded_file = st.file_uploader("⬆️ Import CSV (Overwrites)", type=['csv'])
-        if uploaded_file is not None:
-            try:
-                # IMPORTANT: Use eval to convert string lists back to actual lists
-                uploaded_df = pd.read_csv(uploaded_file, converters={
-                    'Mechanics': eval, 
-                    'Categories': eval, 
-                    'FamilyMechanisms': eval
-                })
-                
-                if not uploaded_df.empty:
-                    full_df = uploaded_df
-                    source = "upload" # Update source indicator
-                    st.success("✅ Loaded data from CSV!")
-            except Exception as e:
-                st.error(f"Error reading CSV: {e}")
+    with c_datamgmt:
+        with st.expander("💾 Data Management", expanded=False):
+            st.markdown("### Export / Import")
+            if not full_df.empty:
+                csv_data = full_df.to_csv(index=False).encode('utf-8')
+                st.download_button(label="⬇️ Export Current Data", data=csv_data, file_name="bgg_collection.csv", mime="text/csv", use_container_width=True)
+            st.divider()
+            uploaded_file = st.file_uploader("⬆️ Import CSV", type=['csv'])
+            if uploaded_file is not None:
+                try:
+                    uploaded_df = pd.read_csv(uploaded_file, converters={'Mechanics': eval, 'Categories': eval, 'FamilyMechanisms': eval})
+                    if not uploaded_df.empty:
+                        full_df = uploaded_df # OVERWRITE current session data
+                        source = "upload"
+                        st.success("✅ Loaded from CSV!")
+                except Exception as e: st.error(f"Error: {e}")
 
-    # Display Source Status
-    if source == "api":
-        st.sidebar.success("Source: BGG API")
-    elif source == "csv":
-        st.sidebar.info("Source: Local CSV")
-    elif source == "upload":
-        st.sidebar.warning("Source: Uploaded File")
+        # Source Status Tag
+        if source == "api": st.success("Source: BGG API")
+        elif source == "csv": st.info("Source: Local CSV")
+        elif source == "upload": st.warning("Source: Uploaded File")
 
 else: st.stop()
 
@@ -343,39 +309,42 @@ if full_df.empty:
     st.warning(f"No games found for user: {username}.")
     st.stop()
 
-# --- SEGREGATION ---
-if 'Type' in full_df.columns:
-    owned_df = full_df[(full_df['IsOwned'] == True) & (full_df['Type'] == 'boardgame')].copy()
-else:
-    owned_df = full_df[full_df['IsOwned'] == True].copy()
+# --- 3. FILTER SECTION (Middle) ---
+with c_filters:
+    st.header("Criteria")
+    
+    # Segregation
+    if 'Type' in full_df.columns:
+        owned_df = full_df[(full_df['IsOwned'] == True) & (full_df['Type'] == 'boardgame')].copy()
+    else:
+        owned_df = full_df[full_df['IsOwned'] == True].copy()
 
-# --- FILTERS ---
-st.sidebar.header("Criteria")
-def get_sorted_options(dataframe, column_name):
-    if dataframe.empty: return []
-    all_lists = dataframe[column_name].tolist()
-    flat_list = [item for sublist in all_lists for item in sublist]
-    counts = Counter(flat_list)
-    return [m[0] for m in counts.most_common()]
+    def get_sorted_options(dataframe, column_name):
+        if dataframe.empty: return []
+        all_lists = dataframe[column_name].tolist()
+        flat_list = [item for sublist in all_lists for item in sublist]
+        counts = Counter(flat_list)
+        return [m[0] for m in counts.most_common()]
 
-sorted_fam_mechs = get_sorted_options(owned_df, 'FamilyMechanisms')
-selected_fam_mechs = st.sidebar.multiselect("Game Type", sorted_fam_mechs)
-sorted_mechs = get_sorted_options(owned_df, 'Mechanics')
-selected_mechanics = st.sidebar.multiselect("Game Mechanics", sorted_mechs)
-sorted_cats = get_sorted_options(owned_df, 'Categories')
-selected_cats = st.sidebar.multiselect("Game Categories", sorted_cats)
-player_count = st.sidebar.slider("Number of Players", 1, 10, 4)
-strict_best = st.sidebar.checkbox("Only 'Best At' this count", value=False, help="Only show games voted Best at this count.")
-play_status = st.sidebar.radio("History", ["All", "Played", "Unplayed (pile of shame)"])
-c1, c2 = st.sidebar.columns(2)
-max_age_req = c1.slider("Max Age", 4, 18, 18)
-max_time = c2.slider("Max Time", 15, 240, 90)
-weight_range = st.sidebar.slider("Complexity", 1.0, 5.0, (1.0, 5.0))
+    sorted_fam_mechs = get_sorted_options(owned_df, 'FamilyMechanisms')
+    selected_fam_mechs = st.multiselect("Game Type", sorted_fam_mechs)
+    sorted_mechs = get_sorted_options(owned_df, 'Mechanics')
+    selected_mechanics = st.multiselect("Game Mechanics", sorted_mechs)
+    sorted_cats = get_sorted_options(owned_df, 'Categories')
+    selected_cats = st.multiselect("Game Categories", sorted_cats)
+    player_count = st.slider("Number of Players", 1, 10, 4)
+    strict_best = st.checkbox("Only 'Best At' this count", value=False, help="Only show games voted Best at this count.")
+    play_status = st.radio("History", ["All", "Played", "Unplayed (pile of shame)"])
+    c1, c2 = st.columns(2)
+    max_age_req = c1.slider("Max Age", 4, 18, 18)
+    max_time = c2.slider("Max Time", 15, 240, 90)
+    weight_range = st.slider("Complexity", 1.0, 5.0, (1.0, 5.0))
 
-mask = (owned_df['Time'] <= max_time) & (owned_df['Weight'].between(weight_range[0], weight_range[1])) & (owned_df['MinAge'] <= max_age_req) 
-if play_status == "Played": mask = mask & (owned_df['NumPlays'] > 0)
-elif play_status == "Unplayed (pile of shame)": mask = mask & (owned_df['NumPlays'] == 0) 
-if strict_best: mask = mask & (owned_df['BestPlayers'].astype(str) == str(player_count))
+    # Apply Logic
+    mask = (owned_df['Time'] <= max_time) & (owned_df['Weight'].between(weight_range[0], weight_range[1])) & (owned_df['MinAge'] <= max_age_req) 
+    if play_status == "Played": mask = mask & (owned_df['NumPlays'] > 0)
+    elif play_status == "Unplayed (pile of shame)": mask = mask & (owned_df['NumPlays'] == 0) 
+    if strict_best: mask = mask & (owned_df['BestPlayers'].astype(str) == str(player_count))
 else: mask = mask & (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
 if selected_mechanics: mask = mask & owned_df['Mechanics'].apply(lambda x: bool(set(selected_mechanics) & set(x)))
 if selected_cats: mask = mask & owned_df['Categories'].apply(lambda x: bool(set(selected_cats) & set(x)))
