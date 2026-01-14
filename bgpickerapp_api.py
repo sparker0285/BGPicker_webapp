@@ -7,45 +7,33 @@ import html
 import plotly.express as px
 from collections import Counter, defaultdict
 from datetime import datetime
+import os
 
 st.set_page_config(page_title="Seth's BG Tool", layout="wide", page_icon="🎲")
 
 # --- CONFIGURATION & TOKEN HANDLING ---
-# 1. Try to load from Streamlit Secrets (Cloud)
 if "BGG_API_TOKEN" in st.secrets:
     BGG_API_TOKEN = st.secrets["BGG_API_TOKEN"]
 else:
-    # 2. If not found, check Session State (in case user just entered it)
-    if "manual_token" not in st.session_state:
-        st.session_state.manual_token = ""
-
-    # 3. If still empty, ask the user via UI
+    if "manual_token" not in st.session_state: st.session_state.manual_token = ""
     if not st.session_state.manual_token:
         st.sidebar.header("⚠️ Setup Required")
-        user_token = st.sidebar.text_input("Enter BGG API Token:", type="password", help="Token not found in secrets. Please enter it manually.")
+        user_token = st.sidebar.text_input("Enter BGG API Token:", type="password", help="Token not found in secrets.")
         if user_token:
             st.session_state.manual_token = user_token
-            st.rerun() # Reload to apply token
+            st.rerun()
         else:
-            st.info("👋 Hello! To use this app, please enter your BGG API Token in the sidebar.")
-            st.stop() # Stop execution here until token is provided
-    
+            st.info("👋 Enter BGG API Token in sidebar to continue.")
+            st.stop()
     BGG_API_TOKEN = st.session_state.manual_token
 
 # --- SESSION STATE INITIALIZATION ---
-if 'active_tab' not in st.session_state:
-    st.session_state['active_tab'] = "🎲 Pick a Game"
+if 'active_tab' not in st.session_state: st.session_state['active_tab'] = "🎲 Pick a Game"
 
 # --- HELPER FUNCTIONS ---
-
 def get_auth_session():
-    """Creates a session with your API Token."""
     session = requests.Session()
-    session.headers.update({
-        "Authorization": f"Bearer {BGG_API_TOKEN}",
-        "User-Agent": "StreamlitGamePicker/9.0",
-        "Accept": "application/xml"
-    })
+    session.headers.update({"Authorization": f"Bearer {BGG_API_TOKEN}", "User-Agent": "StreamlitGamePicker/10.0", "Accept": "application/xml"})
     return session
 
 def clean_description(desc_text):
@@ -65,148 +53,39 @@ def get_best_player_count(poll_tag):
             best_count = num_players
     return best_count
 
-# --- STATS ENGINE ---
+# --- DATA LOADING ENGINE (CSV vs API) ---
 
 @st.cache_data(ttl=3600)
-def fetch_full_play_history(username):
-    """Fetches ALL pages of play history."""
+def fetch_from_api(username):
+    """Fetches fresh data from BGG API."""
     session = get_auth_session()
-    all_plays = []
-    page = 1
-    status_text = st.empty()
-    
-    while True:
-        status_text.text(f"Fetching play history page {page}...")
-        url = f"https://boardgamegeek.com/xmlapi2/plays?username={username}&page={page}"
-        try:
-            r = session.get(url)
-            if r.status_code != 200: break
-            root = ET.fromstring(r.content)
-            plays_on_page = root.findall('play')
-            if not plays_on_page: break
-            
-            for play in plays_on_page:
-                try:
-                    date_str = play.get('date')
-                    game_name = play.find('item').get('name')
-                    game_id = play.find('item').get('objectid')
-                    player_list = play.find('players')
-                    if not player_list: continue
-                    
-                    participants = []
-                    for p in player_list.findall('player'):
-                        try: score = float(p.get('score'))
-                        except: score = -99999 
-                        participants.append({'name': p.get('name'), 'score': score, 'win': p.get('win') == '1'})
-                    
-                    participants.sort(key=lambda x: x['score'], reverse=True)
-                    for i, p in enumerate(participants):
-                        if i > 0 and p['score'] == participants[i-1]['score'] and p['score'] != -99999: p['rank'] = participants[i-1]['rank']
-                        elif p['score'] == -99999: p['rank'] = None 
-                        else: p['rank'] = i + 1
-                            
-                    for p in participants:
-                        all_plays.append({
-                            'Date': pd.to_datetime(date_str), 'Year': pd.to_datetime(date_str).year,
-                            'Game': game_name, 'GameID': game_id,
-                            'Player': p['name'], 'Win': p['win'], 'Rank': p['rank'],
-                            'Score': p['score'] if p['score'] != -99999 else None,
-                            'Opponents': [x['name'] for x in participants if x['name'] != p['name']]
-                        })
-                except: continue
-            page += 1
-            time.sleep(0.5) 
-        except: break
-    status_text.empty()
-    return pd.DataFrame(all_plays)
-
-def fetch_game_stats(username, game_id):
-    """Quick fetch for just-in-time stats on a single game."""
-    session = get_auth_session()
-    url = f"https://boardgamegeek.com/xmlapi2/plays?username={username}&id={game_id}&page=1"
-    try:
-        r = session.get(url)
-        if r.status_code != 200: return None, 0
-        root = ET.fromstring(r.content)
-        total_plays = int(root.get('total'))
-        player_stats = {} 
-        for play in root.findall('play'):
-            players = play.find('players')
-            if not players: continue
-            for p in players.findall('player'):
-                name = p.get('name')
-                win = 1 if p.get('win') == '1' else 0
-                if name not in player_stats: player_stats[name] = {'wins': 0, 'plays': 0}
-                player_stats[name]['plays'] += 1
-                player_stats[name]['wins'] += win
-        data = []
-        for name, stats in player_stats.items():
-            if name.lower() != 'anonymous player':
-                win_pct = (stats['wins'] / stats['plays']) * 100 if stats['plays'] > 0 else 0
-                data.append({"Player": name, "Wins": stats['wins'], "Plays": stats['plays'], "Win Rate": win_pct})
-        return pd.DataFrame(data).sort_values(by="Wins", ascending=False) if data else None, total_plays
-    except: return None, 0
-
-@st.cache_data(ttl=3600)
-def fetch_bgg_collection(username):
-    session = get_auth_session()
-    
-    # BGG often times out if you ask for too much, so we separate calls
-    subtypes_to_fetch = ['boardgame', 'boardgameexpansion']
+    subtypes = ['boardgame', 'boardgameexpansion']
     combined_items = []
     
-    for stype in subtypes_to_fetch:
-        # Show specific spinner for each part
-        with st.spinner(f"Loading {stype}s for {username}..."):
+    for stype in subtypes:
+        with st.spinner(f"Fetching {stype}s from BGG..."):
             url = f"https://boardgamegeek.com/xmlapi2/collection?username={username}&subtype={stype}"
             attempts = 0
-            
             while attempts < 5:
                 try:
                     r = session.get(url)
-                    
                     if r.status_code == 200: 
-                        # Successful fetch
                         try:
                             root = ET.fromstring(r.content)
-                            items = root.findall('item')
-                            combined_items.extend(items)
-                        except Exception as e:
-                            print(f"XML Error for {stype}: {e}")
+                            combined_items.extend(root.findall('item'))
+                        except: pass
                         break
-                        
-                    elif r.status_code == 202:
-                        # BGG is building the report (Standard behavior)
-                        time.sleep(4)
-                        attempts += 1
-                        
-                    elif r.status_code == 429:
-                        # Rate Limit - Wait longer!
-                        time.sleep(5)
-                        attempts += 1
-                        
-                    elif r.status_code == 401:
-                        st.error("Authentication failed. Please check your BGG_API_TOKEN.")
-                        break
-                        
-                    else: 
-                        # Some other error, try once more then skip
-                        time.sleep(2)
-                        attempts += 1
-                        
-                except Exception as e:
-                    print(f"Network Error: {e}")
-                    attempts += 1
-                    time.sleep(2)
-                    
-        # Pause slightly between subtypes to be polite
+                    elif r.status_code == 202: time.sleep(4); attempts += 1
+                    elif r.status_code == 429: time.sleep(5); attempts += 1
+                    elif r.status_code == 401: st.error("Auth failed."); break
+                    else: time.sleep(2); attempts += 1
+                except: attempts += 1; time.sleep(2)
         time.sleep(1)
 
     if not combined_items: return pd.DataFrame()
 
     collection_map = {}
     ownership_map = {}
-    
     for item in combined_items:
         g_id = item.get('objectid')
         try: plays = int(item.find('numplays').text)
@@ -234,26 +113,21 @@ def fetch_bgg_collection(username):
                 for item in det_root.findall('item'):
                     try:
                         g_id = item.get('id')
-                        g_type = item.get('type') # boardgame or boardgameexpansion
-                        
+                        g_type = item.get('type')
                         name = item.find("name[@type='primary']").get('value')
                         image = item.find('image').text if item.find('image') is not None else None
                         if not image: image = item.find('thumbnail').text if item.find('thumbnail') is not None else None
                         desc = clean_description(item.find('description').text)
-                        
                         min_p = int(item.find("minplayers").get('value'))
                         max_p = int(item.find("maxplayers").get('value'))
                         time_p = int(item.find("playingtime").get('value'))
                         min_age = int(item.find("minage").get('value')) if item.find("minage") is not None else 0
-                        
                         stats = item.find('statistics').find('ratings')
                         rating = float(stats.find('average').get('value'))
                         weight = float(stats.find('averageweight').get('value'))
-                        
                         mechanics = [l.get('value') for l in item.findall("link[@type='boardgamemechanic']")]
                         categories = [l.get('value') for l in item.findall("link[@type='boardgamecategory']")]
                         family_mechanisms = [link.get('value').replace("Mechanism:", "").strip() for link in item.findall("link[@type='boardgamefamily']") if link.get('value').startswith("Mechanism:")]
-                        
                         poll = item.find("poll[@name='suggested_numplayers']")
                         best_at = get_best_player_count(poll)
                         
@@ -270,12 +144,108 @@ def fetch_bgg_collection(username):
         time.sleep(0.5)
     progress_bar.empty()
     
-    # Create DF and ensure Type column exists
     df = pd.DataFrame(all_games)
-    if not df.empty and 'Type' not in df.columns:
-        df['Type'] = 'boardgame'
-        
+    if not df.empty and 'Type' not in df.columns: df['Type'] = 'boardgame'
     return df
+
+def load_data(username):
+    """Smart loader: tries CSV first, then API."""
+    csv_file = "bgg_collection.csv"
+    
+    # 1. If explicit reload requested, skip CSV and go to API
+    if st.session_state.get('force_reload', False):
+        df = fetch_from_api(username)
+        st.session_state['force_reload'] = False # Reset flag
+        return df, "api"
+
+    # 2. Try loading local CSV
+    if os.path.exists(csv_file):
+        try:
+            # We need to eval the list columns because CSV saves them as strings
+            df = pd.read_csv(csv_file, converters={
+                'Mechanics': eval, 
+                'Categories': eval, 
+                'FamilyMechanisms': eval
+            })
+            return df, "csv"
+        except:
+            pass # CSV might be corrupt, fall through to API
+
+    # 3. Fallback to API
+    return fetch_from_api(username), "api"
+
+# --- HISTORY & STATS FUNCTIONS ---
+@st.cache_data(ttl=3600)
+def fetch_full_play_history(username):
+    session = get_auth_session()
+    all_plays = []
+    page = 1
+    status_text = st.empty()
+    while True:
+        status_text.text(f"Fetching play history page {page}...")
+        url = f"https://boardgamegeek.com/xmlapi2/plays?username={username}&page={page}"
+        try:
+            r = session.get(url); 
+            if r.status_code != 200: break
+            root = ET.fromstring(r.content)
+            plays = root.findall('play')
+            if not plays: break
+            for play in plays:
+                try:
+                    date_str = play.get('date')
+                    game_name = play.find('item').get('name')
+                    game_id = play.find('item').get('objectid')
+                    player_list = play.find('players')
+                    if not player_list: continue
+                    participants = []
+                    for p in player_list.findall('player'):
+                        try: score = float(p.get('score'))
+                        except: score = -99999 
+                        participants.append({'name': p.get('name'), 'score': score, 'win': p.get('win') == '1'})
+                    participants.sort(key=lambda x: x['score'], reverse=True)
+                    for i, p in enumerate(participants):
+                        if i > 0 and p['score'] == participants[i-1]['score'] and p['score'] != -99999: p['rank'] = participants[i-1]['rank']
+                        elif p['score'] == -99999: p['rank'] = None 
+                        else: p['rank'] = i + 1
+                    for p in participants:
+                        all_plays.append({
+                            'Date': pd.to_datetime(date_str), 'Year': pd.to_datetime(date_str).year,
+                            'Game': game_name, 'GameID': game_id,
+                            'Player': p['name'], 'Win': p['win'], 'Rank': p['rank'],
+                            'Score': p['score'] if p['score'] != -99999 else None,
+                            'Opponents': [x['name'] for x in participants if x['name'] != p['name']]
+                        })
+                except: continue
+            page += 1; time.sleep(0.5)
+        except: break
+    status_text.empty()
+    return pd.DataFrame(all_plays)
+
+def fetch_game_stats(username, game_id):
+    session = get_auth_session()
+    url = f"https://boardgamegeek.com/xmlapi2/plays?username={username}&id={game_id}&page=1"
+    try:
+        r = session.get(url)
+        if r.status_code != 200: return None, 0
+        root = ET.fromstring(r.content)
+        total_plays = int(root.get('total'))
+        player_stats = {} 
+        for play in root.findall('play'):
+            players = play.find('players')
+            if not players: continue
+            for p in players.findall('player'):
+                name = p.get('name')
+                win = 1 if p.get('win') == '1' else 0
+                if name not in player_stats: player_stats[name] = {'wins': 0, 'plays': 0}
+                player_stats[name]['plays'] += 1
+                player_stats[name]['wins'] += win
+        data = []
+        for name, stats in player_stats.items():
+            if name.lower() != 'anonymous player':
+                win_pct = (stats['wins'] / stats['plays']) * 100 if stats['plays'] > 0 else 0
+                data.append({"Player": name, "Wins": stats['wins'], "Plays": stats['plays'], "Win Rate": win_pct})
+        return pd.DataFrame(data).sort_values(by="Wins", ascending=False) if data else None, total_plays
+    except: return None, 0
 
 def render_game_card(game, username):
     st.divider()
@@ -283,9 +253,7 @@ def render_game_card(game, username):
     with cA:
         if game['Image']: st.image(game['Image'], use_container_width=True)
         if not game['IsOwned']: st.caption("⚠️ Not currently owned")
-        # Safe access for Type
         if 'Type' in game and game['Type'] == 'boardgameexpansion': st.caption("🧩 Expansion")
-            
     with cB:
         st.subheader(game['Name'])
         m1, m2, m3, m4 = st.columns(4)
@@ -313,20 +281,37 @@ def render_game_card(game, username):
         st.markdown(f"[View on BGG](https://boardgamegeek.com/boardgame/{game['ID']})")
 
 # --- APP START ---
-st.sidebar.title("Seth's BG Tool")  # <--- UPDATED TITLE HERE
+st.sidebar.title("Seth's BG Tool")
 username = st.sidebar.text_input("BGG Username", value="sparker0285")
 
-if st.sidebar.button("Reload Collection"): 
+# --- DATA RELOAD LOGIC ---
+if st.sidebar.button("Reload Collection from BGG"):
+    st.session_state['force_reload'] = True
     st.cache_data.clear()
-    if 'history_df' in st.session_state: del st.session_state['history_df']
+    st.rerun()
 
 pick_qty = st.sidebar.number_input("Pick Quantity", 1, 5, 1)
 
-if username: full_df = fetch_bgg_collection(username)
+if username:
+    full_df, source = load_data(username)
+    
+    # Show status/download options if loaded from API
+    if source == "api" and not full_df.empty:
+        st.sidebar.success("Loaded fresh data from BGG!")
+        csv = full_df.to_csv(index=False).encode('utf-8')
+        st.sidebar.download_button(
+            label="💾 Download CSV to Persist",
+            data=csv,
+            file_name="bgg_collection.csv",
+            mime="text/csv",
+            help="Download this file, overwrite the one in your project folder, and push to GitHub. This makes the app load instantly next time!"
+        )
+    elif source == "csv":
+        st.sidebar.info("⚡ Loaded instantly from CSV")
 else: st.stop()
 
-if full_df.empty: 
-    st.warning(f"No games found for user: {username}. Check username or privacy settings.")
+if full_df.empty:
+    st.warning(f"No games found for user: {username}.")
     st.stop()
 
 # --- SEGREGATION ---
@@ -352,7 +337,10 @@ sorted_cats = get_sorted_options(owned_df, 'Categories')
 selected_cats = st.sidebar.multiselect("Game Categories", sorted_cats)
 player_count = st.sidebar.slider("Number of Players", 1, 10, 4)
 strict_best = st.sidebar.checkbox("Only 'Best At' this count", value=False, help="Only show games voted Best at this count.")
-play_status = st.sidebar.radio("History", ["All", "Played", "Unplayed"])
+
+# UPDATED: Added (pile of shame) text
+play_status = st.sidebar.radio("History", ["All", "Played", "Unplayed (pile of shame)"])
+
 c1, c2 = st.sidebar.columns(2)
 max_age_req = c1.slider("Max Age", 4, 18, 18)
 max_time = c2.slider("Max Time", 15, 240, 90)
@@ -360,13 +348,12 @@ weight_range = st.sidebar.slider("Complexity", 1.0, 5.0, (1.0, 5.0))
 
 mask = (owned_df['Time'] <= max_time) & (owned_df['Weight'].between(weight_range[0], weight_range[1])) & (owned_df['MinAge'] <= max_age_req) 
 if play_status == "Played": mask = mask & (owned_df['NumPlays'] > 0)
-elif play_status == "Unplayed": mask = mask & (owned_df['NumPlays'] == 0)
+elif play_status == "Unplayed (pile of shame)": mask = mask & (owned_df['NumPlays'] == 0) # Logic Updated to match text
 if strict_best: mask = mask & (owned_df['BestPlayers'].astype(str) == str(player_count))
 else: mask = mask & (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
 if selected_mechanics: mask = mask & owned_df['Mechanics'].apply(lambda x: bool(set(selected_mechanics) & set(x)))
 if selected_cats: mask = mask & owned_df['Categories'].apply(lambda x: bool(set(selected_cats) & set(x)))
 if selected_fam_mechs: mask = mask & owned_df['FamilyMechanisms'].apply(lambda x: bool(set(selected_fam_mechs) & set(x)))
-
 valid_owned_games = owned_df[mask]
 
 # --- MAIN NAVIGATION ---
@@ -374,7 +361,6 @@ nav_options = ["🎲 Pick a Game", "👤 Player Stats", "🔍 Search for a Game"
 selection = st.radio("Navigation", nav_options, horizontal=True, label_visibility="collapsed", index=nav_options.index(st.session_state['active_tab']), key="nav_radio")
 if selection != st.session_state['active_tab']: st.session_state['active_tab'] = selection
 
-# --- TAB 1: PICK A GAME ---
 if st.session_state['active_tab'] == "🎲 Pick a Game":
     st.markdown(f"### **{len(valid_owned_games)} out of {len(owned_df)}** games match criteria")
     if st.button("🎲 Pick Game(s)", type="primary", use_container_width=True):
@@ -383,7 +369,6 @@ if st.session_state['active_tab'] == "🎲 Pick a Game":
             for _, game in picked.iterrows(): render_game_card(game, username)
         else: st.warning("No games found. Adjust filters.")
 
-# --- TAB 2: PLAYER STATS ---
 elif st.session_state['active_tab'] == "👤 Player Stats":
     st.markdown("### 👤 Deep Player Analysis")
     if 'history_df' not in st.session_state:
@@ -394,20 +379,16 @@ elif st.session_state['active_tab'] == "👤 Player Stats":
                 if not plays_df.empty:
                     st.session_state['history_df'] = plays_df
                     st.rerun()
-    
     if 'history_df' in st.session_state:
         plays_df = st.session_state['history_df']
         all_players = sorted(list(set(plays_df['Player'].unique())))
         default_ix = all_players.index(username) if username in all_players else 0
         selected_player = st.selectbox("Select Player to Analyze", all_players, index=default_ix)
-        
         p_df = plays_df[plays_df['Player'] == selected_player].copy()
-        
         meta_lookup = full_df.set_index('ID')[['Mechanics', 'Categories', 'FamilyMechanisms']].to_dict('index')
         stats_mech = defaultdict(lambda: {'plays': 0, 'wins': 0})
         stats_cat = defaultdict(lambda: {'plays': 0, 'wins': 0})
         stats_fam = defaultdict(lambda: {'plays': 0, 'wins': 0})
-        
         for _, row in p_df.iterrows():
             gid = row['GameID']
             won = row['Win']
@@ -419,7 +400,6 @@ elif st.session_state['active_tab'] == "👤 Player Stats":
                 update_stats(meta_lookup[gid]['Mechanics'], stats_mech)
                 update_stats(meta_lookup[gid]['Categories'], stats_cat)
                 update_stats(meta_lookup[gid]['FamilyMechanisms'], stats_fam)
-
         def create_stats_df(stats_dict, limit=5, by_win_rate=False):
             data = []
             for k, v in stats_dict.items():
@@ -430,7 +410,6 @@ elif st.session_state['active_tab'] == "👤 Player Stats":
             if df.empty: return df
             sort_col = 'Win Rate' if by_win_rate else 'Plays'
             return df.sort_values(by=sort_col, ascending=False).head(limit)
-
         k1, k2, k3, k4 = st.columns(4)
         total_wins = len(p_df[p_df['Win'] == True])
         total_plays = len(p_df)
@@ -441,59 +420,31 @@ elif st.session_state['active_tab'] == "👤 Player Stats":
         k3.metric("Win Rate", f"{win_rate:.1f}%")
         k4.metric("Avg Rank", f"{avg_rank:.2f}" if pd.notna(avg_rank) else "N/A")
         st.divider()
-        
         st.subheader(f"🧠 {selected_player}'s Favorites (Most Played)")
         c1, c2, c3 = st.columns(3)
-        with c1:
-            st.markdown("**Game Types**")
-            st.dataframe(create_stats_df(stats_fam, by_win_rate=False), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
-        with c2:
-            st.markdown("**Mechanics**")
-            st.dataframe(create_stats_df(stats_mech, by_win_rate=False), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
-        with c3:
-            st.markdown("**Categories**")
-            st.dataframe(create_stats_df(stats_cat, by_win_rate=False), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
-        
+        with c1: st.markdown("**Game Types**"); st.dataframe(create_stats_df(stats_fam, by_win_rate=False), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
+        with c2: st.markdown("**Mechanics**"); st.dataframe(create_stats_df(stats_mech, by_win_rate=False), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
+        with c3: st.markdown("**Categories**"); st.dataframe(create_stats_df(stats_cat, by_win_rate=False), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
         st.divider()
-        
         st.subheader(f"🥇 {selected_player}'s Best (Highest Win Rate - min 3 plays)")
         b1, b2, b3 = st.columns(3)
-        with b1:
-            st.markdown("**Game Types**")
-            st.dataframe(create_stats_df(stats_fam, by_win_rate=True), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
-        with b2:
-            st.markdown("**Mechanics**")
-            st.dataframe(create_stats_df(stats_mech, by_win_rate=True), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
-        with b3:
-            st.markdown("**Categories**")
-            st.dataframe(create_stats_df(stats_cat, by_win_rate=True), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
-
+        with b1: st.markdown("**Game Types**"); st.dataframe(create_stats_df(stats_fam, by_win_rate=True), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
+        with b2: st.markdown("**Mechanics**"); st.dataframe(create_stats_df(stats_mech, by_win_rate=True), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
+        with b3: st.markdown("**Categories**"); st.dataframe(create_stats_df(stats_cat, by_win_rate=True), hide_index=True, use_container_width=True, column_config={"Win Rate": st.column_config.NumberColumn(format="%.1f%%")})
         st.divider()
-
         c1, c2 = st.columns(2)
-        with c1:
-            year_counts = p_df.groupby('Year').size().reset_index(name='Plays')
-            fig_year = px.bar(year_counts, x='Year', y='Plays', title="Activity by Year")
-            st.plotly_chart(fig_year, use_container_width=True)
-        with c2:
-            year_wins = p_df.groupby('Year')['Win'].mean().reset_index(name='WinRate')
-            year_wins['WinRate'] = year_wins['WinRate'] * 100
-            fig_wr = px.line(year_wins, x='Year', y='WinRate', title="Win Rate % over Time", markers=True)
-            st.plotly_chart(fig_wr, use_container_width=True)
-            
+        with c1: year_counts = p_df.groupby('Year').size().reset_index(name='Plays'); fig_year = px.bar(year_counts, x='Year', y='Plays', title="Activity by Year"); st.plotly_chart(fig_year, use_container_width=True)
+        with c2: year_wins = p_df.groupby('Year')['Win'].mean().reset_index(name='WinRate'); year_wins['WinRate'] = year_wins['WinRate'] * 100; fig_wr = px.line(year_wins, x='Year', y='WinRate', title="Win Rate % over Time", markers=True); st.plotly_chart(fig_wr, use_container_width=True)
         coop_ids = set(full_df[full_df['Mechanics'].apply(lambda x: "Cooperative Game" in x)]['ID'].astype(str))
         game_stats = p_df.groupby(['Game', 'GameID']).agg(Plays=('Game', 'count'), Wins=('Win', 'sum'), AvgRank=('Rank', 'mean')).reset_index()
         game_stats['WinRate'] = (game_stats['Wins'] / game_stats['Plays']) * 100
-        
         st.subheader(f"🏆 Top Games (Performance)")
         perf_df = game_stats[(game_stats['Plays'] >= 3) & (~game_stats['GameID'].isin(coop_ids))].sort_values(by=['WinRate', 'Plays'], ascending=False).head(10)
         st.caption("Excludes Cooperative Games (min 3 plays)")
         st.dataframe(perf_df[['Game', 'WinRate', 'Plays', 'AvgRank']], use_container_width=True, hide_index=True, column_config={"WinRate": st.column_config.NumberColumn(format="%.1f%%"), "AvgRank": st.column_config.NumberColumn(format="%.2f")})
-
         st.subheader(f"🎲 Top Games (Play Count)")
         play_count_df = game_stats.sort_values(by='Plays', ascending=False).head(10)
         st.dataframe(play_count_df[['Game', 'Plays', 'AvgRank', 'WinRate']], use_container_width=True, hide_index=True, column_config={"WinRate": st.column_config.NumberColumn(format="%.1f%%"), "AvgRank": st.column_config.NumberColumn(format="%.2f")})
-
         st.subheader("⚔️ Frequent Opponents")
         opponent_stats = {} 
         for index, row in p_df.iterrows():
@@ -512,15 +463,11 @@ elif st.session_state['active_tab'] == "👤 Player Stats":
             st.dataframe(opp_df, use_container_width=True, hide_index=True, column_config={"My Win Rate": st.column_config.NumberColumn(format="%.1f%%", help="Percentage of games YOU won when playing against this opponent.")})
         else: st.write("No opponent data found (Solo plays?)")
 
-# --- TAB 3: SEARCH FOR A GAME ---
 elif st.session_state['active_tab'] == "🔍 Search for a Game":
     if 'Type' in full_df.columns:
         total_bg = len(full_df[full_df['Type'] == 'boardgame'])
         total_exp = len(full_df[full_df['Type'] == 'boardgameexpansion'])
-    else:
-        total_bg = len(full_df)
-        total_exp = 0
-        
+    else: total_bg = len(full_df); total_exp = 0
     st.markdown(f"### Find a Game (Collection: {total_bg} Games + {total_exp} Expansions)")
     search_options = full_df.sort_values("Name")['Name'].tolist()
     selected_game_name = st.selectbox("Select a game:", options=search_options, index=None, placeholder="Type to search...")
@@ -528,7 +475,6 @@ elif st.session_state['active_tab'] == "🔍 Search for a Game":
         game_row = full_df[full_df['Name'] == selected_game_name].iloc[0]
         render_game_card(game_row, username)
 
-# --- TAB 4: LIST VIEW ---
 elif st.session_state['active_tab'] == "📜 List View":
     v_df = valid_owned_games.copy()
     v_df['Mechanics'] = v_df['Mechanics'].apply(lambda x: ", ".join(x))
