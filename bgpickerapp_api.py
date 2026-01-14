@@ -33,7 +33,7 @@ if 'active_tab' not in st.session_state: st.session_state['active_tab'] = "🎲 
 # --- HELPER FUNCTIONS ---
 def get_auth_session():
     session = requests.Session()
-    session.headers.update({"Authorization": f"Bearer {BGG_API_TOKEN}", "User-Agent": "StreamlitGamePicker/12.0", "Accept": "application/xml"})
+    session.headers.update({"Authorization": f"Bearer {BGG_API_TOKEN}", "User-Agent": "StreamlitGamePicker/12.1", "Accept": "application/xml"})
     return session
 
 def clean_description(desc_text):
@@ -263,7 +263,6 @@ st.sidebar.title("Seth's BG Tool")
 username = st.sidebar.text_input("BGG Username", value="sparker0285")
 
 # --- VISUAL CONTAINERS FOR ORDERING ---
-# We define these containers first so we can control the order of elements
 c_config = st.sidebar.container() # Top: Reload, Pick Qty
 c_filters = st.sidebar.container() # Middle: Criteria, Sliders
 c_datamgmt = st.sidebar.container() # Bottom: Data Mgmt, Source Info
@@ -277,7 +276,6 @@ with c_config:
     pick_qty = st.number_input("Pick Quantity", 1, 5, 1)
 
 # --- 2. DATA MANAGEMENT SECTION (Bottom of Sidebar, but logic runs first) ---
-# We execute this logic *before* filters so updated data is available immediately
 if username:
     full_df, source = load_data(username)
     
@@ -293,12 +291,11 @@ if username:
                 try:
                     uploaded_df = pd.read_csv(uploaded_file, converters={'Mechanics': eval, 'Categories': eval, 'FamilyMechanisms': eval})
                     if not uploaded_df.empty:
-                        full_df = uploaded_df # OVERWRITE current session data
+                        full_df = uploaded_df 
                         source = "upload"
                         st.success("✅ Loaded from CSV!")
                 except Exception as e: st.error(f"Error: {e}")
 
-        # Source Status Tag
         if source == "api": st.success("Source: BGG API")
         elif source == "csv": st.info("Source: Local CSV")
         elif source == "upload": st.warning("Source: Uploaded File")
@@ -313,7 +310,6 @@ if full_df.empty:
 with c_filters:
     st.header("Criteria")
     
-    # Segregation
     if 'Type' in full_df.columns:
         owned_df = full_df[(full_df['IsOwned'] == True) & (full_df['Type'] == 'boardgame')].copy()
     else:
@@ -340,16 +336,16 @@ with c_filters:
     max_time = c2.slider("Max Time", 15, 240, 90)
     weight_range = st.slider("Complexity", 1.0, 5.0, (1.0, 5.0))
 
-    # Apply Logic
+    # Apply Logic - INDENTED CORRECTLY
     mask = (owned_df['Time'] <= max_time) & (owned_df['Weight'].between(weight_range[0], weight_range[1])) & (owned_df['MinAge'] <= max_age_req) 
     if play_status == "Played": mask = mask & (owned_df['NumPlays'] > 0)
     elif play_status == "Unplayed (pile of shame)": mask = mask & (owned_df['NumPlays'] == 0) 
     if strict_best: mask = mask & (owned_df['BestPlayers'].astype(str) == str(player_count))
-else: mask = mask & (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
-if selected_mechanics: mask = mask & owned_df['Mechanics'].apply(lambda x: bool(set(selected_mechanics) & set(x)))
-if selected_cats: mask = mask & owned_df['Categories'].apply(lambda x: bool(set(selected_cats) & set(x)))
-if selected_fam_mechs: mask = mask & owned_df['FamilyMechanisms'].apply(lambda x: bool(set(selected_fam_mechs) & set(x)))
-valid_owned_games = owned_df[mask]
+    else: mask = mask & (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
+    if selected_mechanics: mask = mask & owned_df['Mechanics'].apply(lambda x: bool(set(selected_mechanics) & set(x)))
+    if selected_cats: mask = mask & owned_df['Categories'].apply(lambda x: bool(set(selected_cats) & set(x)))
+    if selected_fam_mechs: mask = mask & owned_df['FamilyMechanisms'].apply(lambda x: bool(set(selected_fam_mechs) & set(x)))
+    valid_owned_games = owned_df[mask]
 
 # --- MAIN NAVIGATION ---
 nav_options = ["🎲 Pick a Game", "👤 Player Stats", "🔍 Search for a Game", "📜 List View"]
