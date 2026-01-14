@@ -8,7 +8,7 @@ import plotly.express as px
 from collections import Counter, defaultdict
 from datetime import datetime
 
-st.set_page_config(page_title="Game Night Selector", layout="wide", page_icon="🎲")
+st.set_page_config(page_title="Seth's BG Tool", layout="wide", page_icon="🎲")
 
 # --- CONFIGURATION & TOKEN HANDLING ---
 # 1. Try to load from Streamlit Secrets (Cloud)
@@ -43,7 +43,7 @@ def get_auth_session():
     session = requests.Session()
     session.headers.update({
         "Authorization": f"Bearer {BGG_API_TOKEN}",
-        "User-Agent": "StreamlitGamePicker/8.0",
+        "User-Agent": "StreamlitGamePicker/9.0",
         "Accept": "application/xml"
     })
     return session
@@ -313,7 +313,7 @@ def render_game_card(game, username):
         st.markdown(f"[View on BGG](https://boardgamegeek.com/boardgame/{game['ID']})")
 
 # --- APP START ---
-st.sidebar.title("🎲 BGG Live Picker")
+st.sidebar.title("Seth's BG Tool")  # <--- UPDATED TITLE HERE
 username = st.sidebar.text_input("BGG Username", value="sparker0285")
 
 if st.sidebar.button("Reload Collection"): 
