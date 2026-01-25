@@ -315,6 +315,24 @@ with c_filters:
     else:
         owned_df = full_df[full_df['IsOwned'] == True].copy()
 
+    # Create a numeric 'Best at' column for filtering
+    def convert_best_player(val):
+        if isinstance(val, str):
+            if val == 'N/A':
+                return 0
+            if '+' in val:
+                return int(val.replace('+', ''))
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return 0 # Default for any other weird values
+
+    if not owned_df.empty:
+        owned_df['BestPlayersNum'] = owned_df['BestPlayers'].apply(convert_best_player)
+    else:
+        # Ensure column exists even if df is empty to prevent errors downstream
+        owned_df['BestPlayersNum'] = pd.Series(dtype=int)
+
     def get_sorted_options(dataframe, column_name):
         if dataframe.empty: return []
         all_lists = dataframe[column_name].tolist()
@@ -328,23 +346,40 @@ with c_filters:
     selected_mechanics = st.multiselect("Game Mechanics", sorted_mechs)
     sorted_cats = get_sorted_options(owned_df, 'Categories')
     selected_cats = st.multiselect("Game Categories", sorted_cats)
-    player_count = st.slider("Number of Players", 1, 10, 4)
-    strict_best = st.checkbox("Only 'Best At' this count", value=False, help="Only show games voted Best at this count.")
+    
+    player_count = st.slider("Number of Players", 1, 10, 4, help="Filters for games that can be played with this many players (i.e., your player count is between the game's min and max players).")
+    
+    best_player_max = int(owned_df['BestPlayersNum'].max()) if not owned_df.empty and owned_df['BestPlayersNum'].max() > 0 else 10
+    best_player_range = st.slider("Best At Player Count", 0, best_player_max, (0, best_player_max), help="Filters by the 'Best At' player count poll from BGG. 0 represents 'N/A'. Using this and 'Number of Players' may give no results if they conflict.")
+
     play_status = st.radio("History", ["All", "Played", "Unplayed (pile of shame)"])
     c1, c2 = st.columns(2)
-    max_age_req = c1.slider("Max Age", 4, 18, 18)
-    max_time = c2.slider("Max Time", 15, 240, 90)
+    age_range = c1.slider("Age Range", 4, 18, (4, 18), help="Filter games suitable for a certain age range.")
+    time_range = c2.slider("Time Range (minutes)", 15, 240, (15, 240), help="Filter games by their total playing time.")
     weight_range = st.slider("Complexity", 1.0, 5.0, (1.0, 5.0))
 
-    # Apply Logic - INDENTED CORRECTLY
-    mask = (owned_df['Time'] <= max_time) & (owned_df['Weight'].between(weight_range[0], weight_range[1])) & (owned_df['MinAge'] <= max_age_req) 
-    if play_status == "Played": mask = mask & (owned_df['NumPlays'] > 0)
-    elif play_status == "Unplayed (pile of shame)": mask = mask & (owned_df['NumPlays'] == 0) 
-    if strict_best: mask = mask & (owned_df['BestPlayers'].astype(str) == str(player_count))
-    else: mask = mask & (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
-    if selected_mechanics: mask = mask & owned_df['Mechanics'].apply(lambda x: bool(set(selected_mechanics) & set(x)))
-    if selected_cats: mask = mask & owned_df['Categories'].apply(lambda x: bool(set(selected_cats) & set(x)))
-    if selected_fam_mechs: mask = mask & owned_df['FamilyMechanisms'].apply(lambda x: bool(set(selected_fam_mechs) & set(x)))
+    # Apply Logic
+    mask = (owned_df['Time'].between(time_range[0], time_range[1])) & \
+           (owned_df['Weight'].between(weight_range[0], weight_range[1])) & \
+           (owned_df['MinAge'].between(age_range[0], age_range[1])) & \
+           (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
+    
+    # Only apply best player filter if the dataframe is not empty and column exists
+    if not owned_df.empty and 'BestPlayersNum' in owned_df.columns:
+        mask &= owned_df['BestPlayersNum'].between(best_player_range[0], best_player_range[1])
+
+    if play_status == "Played":
+        mask &= (owned_df['NumPlays'] > 0)
+    elif play_status == "Unplayed (pile of shame)":
+        mask &= (owned_df['NumPlays'] == 0)
+
+    if selected_mechanics:
+        mask &= owned_df['Mechanics'].apply(lambda x: bool(set(selected_mechanics) & set(x)))
+    if selected_cats:
+        mask &= owned_df['Categories'].apply(lambda x: bool(set(selected_cats) & set(x)))
+    if selected_fam_mechs:
+        mask &= owned_df['FamilyMechanisms'].apply(lambda x: bool(set(selected_fam_mechs) & set(x)))
+        
     valid_owned_games = owned_df[mask]
 
 # --- MAIN NAVIGATION ---
