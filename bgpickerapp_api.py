@@ -347,22 +347,22 @@ with c_filters:
     sorted_cats = get_sorted_options(owned_df, 'Categories')
     selected_cats = st.multiselect("Game Categories", sorted_cats)
     
-    player_count = st.slider("Number of Players", 1, 10, 4, help="Filters for games that can be played with this many players (i.e., your player count is between the game's min and max players).")
+    player_range = st.slider("Number of Players", 1, 10, (1, 10), help="Filter for games that support a number of players within this range.")
     
     best_player_max = int(owned_df['BestPlayersNum'].max()) if not owned_df.empty and owned_df['BestPlayersNum'].max() > 0 else 10
     best_player_range = st.slider("Best At Player Count", 0, best_player_max, (0, best_player_max), help="Filters by the 'Best At' player count poll from BGG. 0 represents 'N/A'. Using this and 'Number of Players' may give no results if they conflict.")
 
-    play_status = st.radio("History", ["All", "Played", "Unplayed (pile of shame)"])
+    play_status = st.radio("History", ["All", "Played", "Pile of Shame (unplayed)"])
     c1, c2 = st.columns(2)
-    age_range = c1.slider("Age Range", 4, 18, (4, 18), help="Filter games suitable for a certain age range.")
-    time_range = c2.slider("Time Range (minutes)", 15, 240, (15, 240), help="Filter games by their total playing time.")
+    age_range = c1.slider("Min Age", 4, 18, (4, 18), help="Filter games suitable for a certain age range.")
+    time_range = c2.slider("Play Time", 15, 240, (15, 240), help="Filter games by their total playing time in minutes.")
     weight_range = st.slider("Complexity", 1.0, 5.0, (1.0, 5.0))
 
     # Apply Logic
     mask = (owned_df['Time'].between(time_range[0], time_range[1])) & \
            (owned_df['Weight'].between(weight_range[0], weight_range[1])) & \
            (owned_df['MinAge'].between(age_range[0], age_range[1])) & \
-           (owned_df['MinPlayers'] <= player_count) & (owned_df['MaxPlayers'] >= player_count)
+           (owned_df['MinPlayers'] <= player_range[1]) & (owned_df['MaxPlayers'] >= player_range[0])
     
     # Only apply best player filter if the dataframe is not empty and column exists
     if not owned_df.empty and 'BestPlayersNum' in owned_df.columns:
@@ -370,7 +370,7 @@ with c_filters:
 
     if play_status == "Played":
         mask &= (owned_df['NumPlays'] > 0)
-    elif play_status == "Unplayed (pile of shame)":
+    elif play_status == "Pile of Shame (unplayed)":
         mask &= (owned_df['NumPlays'] == 0)
 
     if selected_mechanics:
