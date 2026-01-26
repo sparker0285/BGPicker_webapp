@@ -53,72 +53,44 @@ def get_best_player_count(poll_tag):
             best_count = num_players
     return best_count
 
-def fetch_geeklist(list_id):
-    """Fetches game IDs from a BGG Geeklist."""
-    session = get_auth_session()
-    url = f"https://boardgamegeek.com/xmlapi2/geeklist/{list_id}"
-    game_ids = []
-    with st.spinner(f"Fetching BGA Geeklist..."):
-        try:
-            r = session.get(url)
-            if r.status_code == 200:
-                root = ET.fromstring(r.content)
-                for item in root.findall('item'):
-                    game_ids.append(item.get('objectid'))
-            else:
-                st.error(f"Failed to fetch Geeklist (status code: {r.status_code})")
-        except Exception as e:
-            st.error(f"Failed to fetch Geeklist: {e}")
-    return game_ids
-
 # --- DATA LOADING ENGINE ---
 @st.cache_data(ttl=3600)
-def fetch_from_api(username=None, source_type="BGG", list_id=None):
-    """Fetches fresh data from BGG API for a user collection or a geeklist."""
+def fetch_from_api(username):
+    """Fetches fresh data from BGG API."""
     session = get_auth_session()
+    subtypes = ['boardgame', 'boardgameexpansion']
+    combined_items = []
+    for stype in subtypes:
+        with st.spinner(f"Fetching {stype}s from BGG..."):
+            url = f"https://boardgamegeek.com/xmlapi2/collection?username={username}&subtype={stype}"
+            attempts = 0
+            while attempts < 5:
+                try:
+                    r = session.get(url)
+                    if r.status_code == 200: 
+                        try:
+                            root = ET.fromstring(r.content)
+                            combined_items.extend(root.findall('item'))
+                        except: pass
+                        break
+                    elif r.status_code == 202: time.sleep(4); attempts += 1
+                    elif r.status_code == 429: time.sleep(5); attempts += 1
+                    elif r.status_code == 401: st.error("Auth failed."); break
+                    else: time.sleep(2); attempts += 1
+                except: attempts += 1; time.sleep(2)
+        time.sleep(1)
+    if not combined_items: return pd.DataFrame()
     collection_map = {}
     ownership_map = {}
-    game_ids = []
-
-    if source_type == "BGG" and username:
-        subtypes = ['boardgame', 'boardgameexpansion']
-        combined_items = []
-        for stype in subtypes:
-            with st.spinner(f"Fetching {stype}s for {username} from BGG..."):
-                url = f"https://boardgamegeek.com/xmlapi2/collection?username={username}&subtype={stype}"
-                attempts = 0
-                while attempts < 5:
-                    try:
-                        r = session.get(url)
-                        if r.status_code == 200:
-                            try:
-                                root = ET.fromstring(r.content)
-                                combined_items.extend(root.findall('item'))
-                            except: pass
-                            break
-                        elif r.status_code == 202: time.sleep(4); attempts += 1
-                        elif r.status_code == 429: time.sleep(5); attempts += 1
-                        elif r.status_code == 401: st.error("Auth failed."); break
-                        else: time.sleep(2); attempts += 1
-                    except: attempts += 1; time.sleep(2)
-            time.sleep(1)
-        if not combined_items: return pd.DataFrame()
-        for item in combined_items:
-            g_id = item.get('objectid')
-            try: plays = int(item.find('numplays').text)
-            except: plays = 0
-            status = item.find('status')
-            is_owned = status.get('own') == "1" if status is not None else False
-            collection_map[g_id] = plays
-            ownership_map[g_id] = is_owned
-        game_ids = list(collection_map.keys())
-
-    elif source_type == "BGA" and list_id:
-        game_ids = fetch_geeklist(list_id)
-        for g_id in game_ids:
-            collection_map[g_id] = 0  # No play data from geeklist
-            ownership_map[g_id] = True # All are "owned"
-
+    for item in combined_items:
+        g_id = item.get('objectid')
+        try: plays = int(item.find('numplays').text)
+        except: plays = 0
+        status = item.find('status')
+        is_owned = status.get('own') == "1" if status is not None else False
+        collection_map[g_id] = plays
+        ownership_map[g_id] = is_owned
+    game_ids = list(collection_map.keys())
     if not game_ids: return pd.DataFrame()
     batch_size = 20
     all_games = []
@@ -167,26 +139,18 @@ def fetch_from_api(username=None, source_type="BGG", list_id=None):
     if not df.empty and 'Type' not in df.columns: df['Type'] = 'boardgame'
     return df
 
-def load_data(username, source_type="BGG"):
-    if source_type == "BGA":
-        csv_file = "bga_collection.csv"
-        list_id = "252354"
-    else:
-        csv_file = f"bgg_collection_{username}.csv" if username else "bgg_collection.csv"
-        list_id = None
-
+def load_data(username):
+    csv_file = "bgg_collection.csv"
     if st.session_state.get('force_reload', False):
-        df = fetch_from_api(username=username, source_type=source_type, list_id=list_id)
-        st.session_state['force_reload'] = False
-        if not df.empty:
-            df.to_csv(csv_file, index=False)
+        df = fetch_from_api(username)
+        st.session_state['force_reload'] = False 
         return df, "api"
     if os.path.exists(csv_file):
         try:
             df = pd.read_csv(csv_file, converters={'Mechanics': eval, 'Categories': eval, 'FamilyMechanisms': eval})
             return df, "csv"
-        except: pass
-    return fetch_from_api(username=username, source_type=source_type, list_id=list_id), "api"
+        except: pass 
+    return fetch_from_api(username), "api"
 
 # --- HISTORY & STATS FUNCTIONS ---
 @st.cache_data(ttl=3600)
@@ -209,7 +173,6 @@ def fetch_full_play_history(username):
                     date_str = play.get('date')
                     game_name = play.find('item').get('name')
                     game_id = play.find('item').get('objectid')
-                    location = play.get('location')
                     player_list = play.find('players')
                     if not player_list: continue
                     participants = []
@@ -225,7 +188,7 @@ def fetch_full_play_history(username):
                     for p in participants:
                         all_plays.append({
                             'Date': pd.to_datetime(date_str), 'Year': pd.to_datetime(date_str).year,
-                            'Game': game_name, 'GameID': game_id, 'Location': location,
+                            'Game': game_name, 'GameID': game_id,
                             'Player': p['name'], 'Win': p['win'], 'Rank': p['rank'],
                             'Score': p['score'] if p['score'] != -99999 else None,
                             'Opponents': [x['name'] for x in participants if x['name'] != p['name']]
@@ -297,10 +260,7 @@ def render_game_card(game, username):
 
 # --- APP LAYOUT START ---
 st.sidebar.title("Seth's BG Tool")
-source_type = st.sidebar.radio("Data Source", ["BGG Collection", "Board Game Arena"], key="data_source")
-username = None
-if source_type == "BGG Collection":
-    username = st.sidebar.text_input("BGG Username", value="sparker0285")
+username = st.sidebar.text_input("BGG Username", value="sparker0285")
 
 # --- VISUAL CONTAINERS FOR ORDERING ---
 c_config = st.sidebar.container() # Top: Reload, Pick Qty
@@ -316,15 +276,9 @@ with c_config:
     pick_qty = st.number_input("Pick Quantity", 1, 5, 1)
 
 # --- 2. DATA MANAGEMENT SECTION (Bottom of Sidebar, but logic runs first) ---
-data_loaded = False
-if source_type == "BGG Collection" and username:
-    full_df, source = load_data(username, source_type="BGG")
-    data_loaded = True
-elif source_type == "Board Game Arena":
-    full_df, source = load_data(username=None, source_type="BGA")
-    data_loaded = True
-
-if data_loaded:
+if username:
+    full_df, source = load_data(username)
+    
     with c_datamgmt:
         with st.expander("💾 Data Management", expanded=False):
             st.markdown("### Export / Import")
@@ -345,18 +299,22 @@ if data_loaded:
         if source == "api": st.success("Source: BGG API")
         elif source == "csv": st.info("Source: Local CSV")
         elif source == "upload": st.warning("Source: Uploaded File")
-else:
-    st.info("⬆️ Select a Data Source and enter a BGG Username if required.")
-    st.stop()
+
+else: st.stop()
 
 if full_df.empty:
-    st.warning(f"No games found for the selected source.")
+    st.warning(f"No games found for user: {username}.")
     st.stop()
 
 # --- 3. FILTER SECTION (Middle) ---
 with c_filters:
     st.header("Criteria")
     
+    if 'Type' in full_df.columns:
+        owned_df = full_df[(full_df['IsOwned'] == True) & (full_df['Type'] == 'boardgame')].copy()
+    else:
+        owned_df = full_df[full_df['IsOwned'] == True].copy()
+
     # Create a numeric 'Best at' column for filtering
     def convert_best_player(val):
         if isinstance(val, str):
@@ -449,13 +407,7 @@ elif st.session_state['active_tab'] == "👤 Player Stats":
                     st.rerun()
     if 'history_df' in st.session_state:
         plays_df = st.session_state['history_df']
-        
-        if 'Location' in plays_df.columns:
-            only_bga = st.checkbox("Show Only BGA Plays", help="Filter history for plays at 'BoardGameArena' location.")
-            if only_bga:
-                plays_df = plays_df[plays_df['Location'] == 'BoardGameArena'].copy()
-
-        all_players = sorted(list(set(plays_df['Player'].unique()))) if not plays_df.empty else []
+        all_players = sorted(list(set(plays_df['Player'].unique())))
         default_ix = all_players.index(username) if username in all_players else 0
         selected_player = st.selectbox("Select Player to Analyze", all_players, index=default_ix)
         p_df = plays_df[plays_df['Player'] == selected_player].copy()
