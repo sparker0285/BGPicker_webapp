@@ -73,7 +73,7 @@ def fetch_geeklist(list_id):
 
 # --- DATA LOADING ENGINE ---
 @st.cache_data(ttl=3600)
-def fetch_from_api(username=None, source_type="BGG", list_id=None):
+def fetch_from_api(username=None, source_type="BGG", list_ids=None):
     """Fetches fresh data from BGG API for a user collection or a geeklist."""
     session = get_auth_session()
     collection_map = {}
@@ -113,11 +113,16 @@ def fetch_from_api(username=None, source_type="BGG", list_id=None):
             ownership_map[g_id] = is_owned
         game_ids = list(collection_map.keys())
 
-    elif source_type == "BGA" and list_id:
-        game_ids = fetch_geeklist(list_id)
+    elif source_type == "BGA" and list_ids:
+        all_geeklist_game_ids = []
+        for list_id in list_ids:
+            all_geeklist_game_ids.extend(fetch_geeklist(list_id))
+        
+        game_ids = list(set(all_geeklist_game_ids)) # Get unique games
+        st.info(f"Found {len(game_ids)} unique games on BGA.") # Inform user
         for g_id in game_ids:
-            collection_map[g_id] = 0  # No play data from geeklist
-            ownership_map[g_id] = True # All are "owned"
+            collection_map[g_id] = 0
+            ownership_map[g_id] = True
 
     if not game_ids: return pd.DataFrame()
     batch_size = 20
@@ -170,13 +175,14 @@ def fetch_from_api(username=None, source_type="BGG", list_id=None):
 def load_data(username, source_type="BGG"):
     if source_type == "BGA":
         csv_file = "bga_collection.csv"
-        list_id = "252354"
+        # The main BGA geeklist is split into multiple smaller lists
+        list_ids = ["294273", "294274", "294275", "294276", "294277"] 
     else:
         csv_file = f"bgg_collection_{username}.csv" if username else "bgg_collection.csv"
-        list_id = None
+        list_ids = None
 
     if st.session_state.get('force_reload', False):
-        df = fetch_from_api(username=username, source_type=source_type, list_id=list_id)
+        df = fetch_from_api(username=username, source_type=source_type, list_ids=list_ids)
         st.session_state['force_reload'] = False
         if not df.empty:
             df.to_csv(csv_file, index=False)
@@ -186,7 +192,7 @@ def load_data(username, source_type="BGG"):
             df = pd.read_csv(csv_file, converters={'Mechanics': eval, 'Categories': eval, 'FamilyMechanisms': eval})
             return df, "csv"
         except: pass
-    return fetch_from_api(username=username, source_type=source_type, list_id=list_id), "api"
+    return fetch_from_api(username=username, source_type=source_type, list_ids=list_ids), "api"
 
 # --- HISTORY & STATS FUNCTIONS ---
 @st.cache_data(ttl=3600)
