@@ -54,22 +54,42 @@ def get_best_player_count(poll_tag):
     return best_count
 
 def fetch_geeklist(list_id):
-    """Fetches game IDs from a BGG Geeklist."""
+    """Fetches game IDs from a BGG Geeklist with retry logic."""
     session = get_auth_session()
     url = f"https://boardgamegeek.com/xmlapi2/geeklist/{list_id}"
-    game_ids = []
-    with st.spinner(f"Fetching BGA Geeklist..."):
-        try:
-            r = session.get(url)
-            if r.status_code == 200:
-                root = ET.fromstring(r.content)
-                for item in root.findall('item'):
-                    game_ids.append(item.get('objectid'))
-            else:
-                st.error(f"Failed to fetch Geeklist (status code: {r.status_code})")
-        except Exception as e:
-            st.error(f"Failed to fetch Geeklist: {e}")
-    return game_ids
+    
+    with st.spinner(f"Fetching Geeklist ID: {list_id}..."):
+        attempts = 0
+        while attempts < 5:
+            try:
+                r = session.get(url)
+                if r.status_code == 200:
+                    game_ids = []
+                    root = ET.fromstring(r.content)
+                    for item in root.findall('item'):
+                        game_ids.append(item.get('objectid'))
+                    return game_ids # Success, exit function
+                
+                elif r.status_code == 202: # Queued, wait and retry
+                    st.warning(f"BGG API busy (202). Retrying for Geeklist {list_id}...")
+                    time.sleep(3)
+                    attempts += 1
+                elif r.status_code in [403, 429]: # Rate limited, wait longer
+                    st.warning(f"BGG rate limit hit ({r.status_code}). Retrying for Geeklist {list_id}...")
+                    time.sleep(5)
+                    attempts += 1
+                else: # Other errors (like 404), maybe transient
+                    st.warning(f"API returned {r.status_code} for Geeklist {list_id}. Retrying...")
+                    time.sleep(2)
+                    attempts += 1
+
+            except Exception as e:
+                st.error(f"Exception while fetching Geeklist {list_id}: {e}")
+                attempts += 1
+                time.sleep(2)
+
+    st.error(f"Failed to fetch Geeklist {list_id} after multiple attempts.")
+    return [] # Return empty list on failure
 
 # --- DATA LOADING ENGINE ---
 @st.cache_data(ttl=3600)
@@ -117,9 +137,11 @@ def fetch_from_api(username=None, source_type="BGG", list_ids=None):
         all_geeklist_game_ids = []
         for list_id in list_ids:
             all_geeklist_game_ids.extend(fetch_geeklist(list_id))
+            time.sleep(1) # Add a 1-second delay between geeklist fetches to be polite to the API
         
         game_ids = list(set(all_geeklist_game_ids)) # Get unique games
-        st.info(f"Found {len(game_ids)} unique games on BGA.") # Inform user
+        if game_ids:
+            st.info(f"Found {len(game_ids)} unique games on BGA.")
         for g_id in game_ids:
             collection_map[g_id] = 0
             ownership_map[g_id] = True
