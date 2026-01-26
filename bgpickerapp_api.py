@@ -357,6 +357,11 @@ if full_df.empty:
 with c_filters:
     st.header("Criteria")
     
+    if 'Type' in full_df.columns:
+        owned_df = full_df[(full_df['IsOwned'] == True) & (full_df['Type'] == 'boardgame')].copy()
+    else:
+        owned_df = full_df[full_df['IsOwned'] == True].copy()
+
     # Create a numeric 'Best at' column for filtering
     def convert_best_player(val):
         if isinstance(val, str):
